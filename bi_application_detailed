@@ -1,0 +1,193 @@
+--as of 5/8/2026
+CREATE OR REPLACE TABLE commercial_analytics.public.bi_application_detailed AS
+
+WITH
+
+-- Vertical mapping helper (avoids duplicating CASE WHEN logic)
+vertical_map AS (
+  SELECT
+    partner_short,
+    partner_grouping,
+    partner_group_legacy,
+    account_manager,
+    MAX(INITCAP(vertical_l1)) AS vertical_raw
+  FROM commercial_analytics.public.partner_classification_aggregate
+  GROUP BY ALL
+),
+
+partner_legacy AS (
+  SELECT DISTINCT
+    pc.partner_grouping,
+    pc.vertical_l1,
+    pc.partner_short,
+    am.account_manager
+  FROM commercial_analytics.commercial_analytics.partner_classification_legacy pc
+  LEFT JOIN commercial_analytics.commercial_analytics.account_assignments_lkup_legacy_partners am
+    ON pc.partner_grouping_snowflake = am.partner_grouping_legacy
+),
+
+int_apps AS (
+  SELECT
+    order_id,
+    application_type,
+    country,
+    created_at,
+    created_date
+  FROM hive_metastore.kasa.int_applications
+)
+
+SELECT
+  -- Source & Timestamps
+  bia.source,
+  bia.timestamp_utc,
+  YEAR(bia.timestamp_utc)          AS yr_utc,
+  MONTH(bia.timestamp_utc)         AS mth_utc,
+  CAST(bia.timestamp_utc AS DATE)  AS date_utc,
+  HOUR(bia.timestamp_utc)          AS hour_utc,
+
+  bia.timestamp_etz,
+  YEAR(bia.timestamp_etz)          AS yr_etz,
+  MONTH(bia.timestamp_etz)         AS mth_etz,
+  CAST(bia.timestamp_etz AS DATE)  AS date_etz,
+  HOUR(bia.timestamp_etz)          AS hour_etz,
+
+  -- Application IDs
+  bia.application_id               AS application_id_redshift,
+  bia.uplift_application_id        AS application_id_legacy,
+  COALESCE(bia.application_id, bia.uplift_application_id) AS application_id,
+  COALESCE(biag.account_id, bia.application_id, bia.uplift_application_id) as account_id,
+
+  -- Decision Status
+  bia.decision_status              AS decision_status_redshift,
+  biag.status                      AS decision_status_legacy,
+
+  CASE
+    WHEN bia.decision_status IN ('approved', 'APPROVED')                                    THEN 'approved'
+    WHEN bia.decision_status IN ('REJECTED', 'aa')                                          THEN 'rejected'
+    WHEN bia.decision_status = 'cfn'                                                        THEN 'credit_freeze'
+    WHEN bia.decision_status IN ('unknown', 'UNKNOWN - MIXED STATUS', 'EXPIRED - UNKNOWN')
+      AND biag.status IS NULL                                                               THEN 'unknown'
+    WHEN bia.decision_status IN ('unknown', 'UNKNOWN - MIXED STATUS', 'EXPIRED - UNKNOWN')
+      THEN CASE
+             WHEN biag.status IN ('approved', 'APPROVED') THEN 'approved'
+             WHEN biag.status IN ('REJECTED', 'aa')       THEN 'rejected'
+             WHEN biag.status = 'cfn'                     THEN 'credit_freeze'
+             ELSE biag.status
+           END
+    ELSE bia.decision_status
+  END AS decision_status,
+
+  -- FICO
+  bia.fico_score                                    AS fico_score_redshift,
+  biag.fico                                         AS fico_score_legacy,
+  COALESCE(bia.fico_score, biag.fico)               AS fico_score,
+
+  bia.fico_550                                      AS fico_550_redshift,
+  CASE WHEN biag.fico >= 550 THEN TRUE END          AS fico_550_legacy,
+  COALESCE(bia.fico_score, biag.fico) >= 550        AS fico_550,
+
+  -- Account Manager
+  COALESCE(
+    pca.account_manager,
+    pcl.account_manager,
+    'No Account Manager Assigned'
+  ) AS account_manager,
+
+  -- Vertical (macro to avoid repeating CASE WHEN)
+  CASE
+    WHEN pca.vertical_raw = 'Car_rental'         THEN 'Car Rental'
+    WHEN pca.vertical_raw IN ('Ota','Ota_meta')  THEN 'OTA/Meta'
+    WHEN pca.vertical_raw = 'Package_ota_rest'   THEN 'Package'
+    WHEN pca.vertical_raw IN ('Travel_agencies', 'Independent_agent', 'Web_agent' ) THEN 'Travel Agencies'
+    WHEN pca.vertical_raw IS NULL                THEN 'No Vertical Assigned'
+    ELSE pca.vertical_raw
+  END AS vertical_redshift,
+
+  pcl.vertical_l1 AS vertical_legacy,
+
+  COALESCE(
+    CASE
+      WHEN COALESCE(pca.vertical_raw,pcl.vertical_l1) = 'Car_rental'         THEN 'Car Rental'
+      WHEN COALESCE(pca.vertical_raw,pcl.vertical_l1) IN ('Ota','Ota_meta')  THEN 'OTA/Meta'
+      WHEN COALESCE(pca.vertical_raw,pcl.vertical_l1) = 'Package_ota_rest'   THEN 'Package'
+      WHEN COALESCE(pca.vertical_raw,pcl.vertical_l1) IN ('Travel_agencies', 'Independent_agent', 'Web_agent' ) THEN 'Travel Agencies'
+      WHEN COALESCE(pca.vertical_raw,pcl.vertical_l1) IS NULL                THEN 'No Vertical Assigned'
+      ELSE COALESCE(pca.vertical_raw,pcl.vertical_l1)
+    END,
+    pcl.vertical_l1
+  ) AS vertical,
+
+  -- Partner Grouping
+  COALESCE(bia.partner_grouping, pca.partner_grouping, 'No Partner Grouping Attached') AS partner_grouping_redshift,
+  COALESCE(pcl.partner_grouping, pca.partner_group_legacy, 'No Partner Grouping Attached') AS partner_group_legacy,
+  COALESCE(
+    bia.partner_grouping,
+    pca.partner_grouping,
+    pcl.partner_grouping,
+    pca.partner_group_legacy,
+    'No Partner Grouping Attached'
+  ) AS partner_grouping,
+
+  -- Partner Short
+  bia.partner_short                               AS partner_short_redshift,
+  biag.partner_short                              AS partner_short_legacy,
+  COALESCE(bia.partner_short, biag.partner_short) AS partner_short,
+
+  -- Order IDs
+  bia.uplift_order_id,
+  biag.order_id order_id_legacy,
+  COALESCE(bia.uplift_order_id, biag.order_id)   AS order_id,
+  inta.application_type,
+  fms.migration_status,
+  -- Country
+  bia.applicant_country                                       AS applicant_country_redshift,
+  biag.borrower_country                                       AS applicant_country_legacy,
+  COALESCE(bia.applicant_country, biag.borrower_country)      AS applicant_country,
+
+    bia.merchant_country                                       AS merchant_country_redshift,
+  biag.merchant_country                                       AS merchant_country_legacy,
+  COALESCE(bia.merchant_country, biag.merchant_country)      AS merchant_country,
+
+  -- Misc
+  INITCAP(bia.channel)   AS channel_redshift,
+  biag.app_econsent,
+  biag.loan_econsent,
+  biag.brand,
+   COALESCE( biag.agent_email, bar.agent_email) as agent_email,
+  -- Metrics
+    COALESCE(bia.gmv_amount_usd, biag.gmv_amount_usd) AS gmv_usd,
+  COALESCE(bia.gmv_amount_cad, biag.gmv_amount_cad) AS gmv_cad,
+  1                                                                                    AS application_count,
+  CASE WHEN bia.fico_score >= 550 THEN 1 END                                           AS fico_550_application_count_redshift,
+  CASE WHEN biag.fico >= 550 THEN 1 END                                                AS fico_550_application_count_legacy,
+  CASE WHEN COALESCE(bia.fico_score, biag.fico) >= 550 THEN 1 END                     AS fico_550_application_count,
+
+  CASE WHEN bia.decision_status IN ('approved', 'APPROVED') THEN 1 END                AS application_approved_count_redshift,
+  CASE WHEN biag.status IN ('approved', 'APPROVED') THEN 1 END                        AS application_approved_count_legacy,
+  CASE WHEN COALESCE(bia.decision_status, biag.status) IN ('approved','APPROVED') THEN 1 END AS application_approved_count,
+
+  CASE WHEN bia.loan_accepted = TRUE THEN 1 END                                        AS application_accepted_count_redshift,
+  CASE WHEN biag.hard_pull = TRUE THEN 1 END                                           AS application_accepted_count_legacy,
+  CASE WHEN COALESCE(bia.loan_accepted, biag.hard_pull) = TRUE THEN 1 END             AS application_accepted_count
+
+FROM commercial_analytics.public.bi_application bia
+
+LEFT JOIN commercial_analytics.commercial_analytics.bi_application_legacy biag
+  ON bia.uplift_application_id = biag.application_id
+
+LEFT JOIN   commercial_analytics.commercial_analytics.funnel_migration_status fms ON bia.uplift_upcode = fms.upcode
+
+LEFT JOIN partner_legacy pcl
+  ON LOWER(biag.partner_short) = LOWER(pcl.partner_short)
+
+LEFT JOIN vertical_map pca
+  ON LOWER(bia.partner_short) = LOWER(pca.partner_short)
+
+LEFT JOIN int_apps inta
+  ON COALESCE(bia.uplift_order_id, biag.order_id) = inta.order_id
+
+LEFT JOIN commercial_analytics.commercial_analytics.bi_application_redshift bar ON bia.application_id = bar.application_id
+
+--WHERE NOT (bia.source = 'redshift' AND bia.merchant_country = 'CA')
+
+ORDER BY date_utc DESC, application_id_redshift ASC, application_id_legacy ASC
