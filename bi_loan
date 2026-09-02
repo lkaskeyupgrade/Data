@@ -1,0 +1,143 @@
+create or replace TABLE commercial_analytics.public.bi_loan as
+
+WITH base AS (
+
+    -- ---- redshift extract ----
+    SELECT
+         uplift_loan_id
+        ,loan_id
+        ,order_request_id
+        ,order_detail_id
+        ,upcode
+        ,CASE
+            WHEN partner_grouping LIKE '%Carnival%'              THEN 'Carnival Cruise Line'
+            WHEN partner_grouping LIKE '%Allegiant%'             THEN 'Allegiant Travel'
+            WHEN partner_grouping = 'American Airlines Group'    THEN 'American Airlines Vacations'
+            WHEN partner_grouping = 'Apple Leisure Group'        THEN 'Apple Leisure Group'
+            WHEN partner_grouping ILIKE '%jetblue vacations%'    THEN 'JetBlue'
+            WHEN partner_grouping ILIKE '%long & Mcquade%'       THEN 'Long & McQuade LTD'
+            WHEN partner_grouping ILIKE '%princess%'             THEN 'Princess Cruise Lines'
+            WHEN partner_grouping ILIKE '%redtag%'               THEN 'RedTag'
+            WHEN partner_grouping ILIKE '%sunwing%'              THEN 'Sunwing Vacations'
+            WHEN partner_grouping ILIKE '%tripcentral%'          THEN 'TripCentral'
+            WHEN partner_grouping ILIKE '%westjet%'              THEN 'WestJet'
+            WHEN partner_grouping ILIKE '%Wyndham%'              THEN 'Wyndham Hotels & Resorts'
+            ELSE partner_grouping
+         END                                                    AS partner_grouping
+        ,partner_short
+        ,true                                                   AS loan_issued
+        ,timestamp_utc
+        ,timestamp_etz
+        ,loan_date_utc
+        ,loan_date_etz
+        ,country
+        ,currency_local
+        ,gmv_amount_local
+        ,gmv_amount_usd
+        ,gmv_amount_cad
+        ,loan_amount_local
+        ,loan_amount_usd
+        ,loan_amount_cad
+        ,mdr_rate
+        ,cast(mdr_amount_local AS decimal(12,2))                AS mdr_amount_local
+        ,mdr_amount_usd
+        ,mdr_amount_cad
+        ,apr
+        ,merchant_path
+        ,channel
+        ,device_type
+        ,loan_term
+        ,subvention
+        ,days_past_due
+        ,source
+        ,partner_confirmation
+    FROM commercial_analytics.commercial_analytics.bi_loan_redshift
+    WHERE 1=1
+
+    UNION ALL
+
+    -- ---- legacy ----
+    SELECT
+         l.loan_id                                              AS uplift_loan_id
+        ,null                                                   AS loan_id
+        ,null                                                   AS order_request_id
+        ,null                                                   AS order_detail_id
+        ,l.upcode
+        ,l.partner_grouping
+        ,l.partner_short
+        ,true                                                   AS loan_issued
+        ,l.loan_date_timestamp_utc                              AS timestamp_utc
+        ,l.loan_date_timestamp_etz                              AS timestamp_etz
+        ,cast(l.loan_date_timestamp_utc AS date)                AS loan_date_utc
+        ,cast(convert_timezone('UTC','America/New_York',l.loan_date_timestamp_utc) AS date) AS loan_date_etz
+        ,l.borrower_country                                     AS country
+        ,l.currency_local
+        ,l.gmv_amount_local
+        ,l.gmv_amount_usd
+        ,l.gmv_amount_cad
+        ,l.loan_amount_local
+        ,l.loan_amount_usd
+        ,l.loan_amount_cad
+        ,bps_of_loan                                            AS mdr_rate
+        ,cast(subvention_variable_fee_local AS decimal(12,2))   AS mdr_amount_local
+        ,subvention_variable_fee_usd                            AS mdr_amount_usd
+        ,subvention_variable_fee_cad                            AS mdr_amount_cad
+        ,l.apr
+        ,null                                                   AS merchant_path
+        ,l.channel
+        ,l.device_type
+        ,l.loan_term
+        ,CASE WHEN subvention_id IS NOT NULL THEN true ELSE false END AS subvention
+        ,-99                                                    AS days_past_due
+        ,'legacy'                                               AS source
+        ,l.partner_confirmation
+    FROM commercial_analytics.commercial_analytics.bi_loan_legacy l
+    WHERE 1=1
+      AND loan_date_utc >= '2023-01-01'
+      AND report_as_loan
+)
+
+SELECT
+     uplift_loan_id
+    ,loan_id
+    ,partner_confirmation
+    ,upcode
+    ,partner_grouping
+    ,partner_short
+    ,loan_issued
+    ,loan_amount_local
+    ,loan_amount_usd
+    ,loan_amount_cad
+    ,timestamp_utc
+    ,timestamp_etz
+    ,loan_date_utc
+    ,loan_date_etz
+    ,month(timestamp_utc)  AS mth_utc
+    ,month(timestamp_etz)  AS mth_etz
+    ,year(timestamp_utc)   AS yr_utc
+    ,year(timestamp_etz)   AS yr_etz
+    ,country
+    ,apr
+    ,currency_local
+    ,gmv_amount_local
+    ,gmv_amount_usd
+    ,gmv_amount_cad
+    ,loan_term
+    ,device_type
+    ,channel
+    ,subvention
+    ,mdr_rate
+    ,mdr_amount_local
+    ,mdr_amount_usd
+    ,mdr_amount_cad
+    ,days_past_due
+    ,source
+FROM base b
+WHERE b.source = 'redshift'
+   OR NOT EXISTS (
+        SELECT 1
+        FROM base r
+        WHERE r.uplift_loan_id = b.uplift_loan_id
+          AND r.source = 'redshift'
+   )
+;
