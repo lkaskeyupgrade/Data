@@ -1,0 +1,137 @@
+--gets all the subvented loans and refunds
+
+WITH account_id_subvention_fee
+         AS (SELECT ls.account_id, sf.id
+                      FROM flexpaymerchantsubventionfee.loan_subvention_merchant_fee sf LEFT JOIN flexpaymerchantsubventionfee.loan_subvention ls
+                                ON ls.id = sf.loan_subvention_id
+             --WHERE CONVERT_TIMEZONE('UTC', 'UTC', sf.create_date)::DATE BETWEEN '2025-07-01'::DATE and '2025-07-31'::DATE) 1,342 records
+                WHERE CONVERT_TIMEZONE('UTC', 'UTC', sf.effective_date)::DATE BETWEEN '2025-08-01'::DATE and '2025-08-31'::DATE)  -- changed to sf.effective_date as we need the refund_date 1,433 records
+
+
+     
+    --dedups cte
+    
+,     subvented_account_ids AS (
+        SELECT DISTINCT account_id FROM account_id_subvention_fee
+      )
+
+     --attach cruise data. join all the tables to get to cruise_reservations
+     
+     ,account_cruise_details AS (
+        SELECT a.account_id,
+               MAX(cr.ship_code)  AS ship_code,
+               MIN(cr.start_date) AS start_date,
+               MAX(cr.end_date)   AS end_date
+             FROM subvented_account_ids a
+                      JOIN bnplapplication.application app ON a.account_id = app.id
+                      JOIN bnplapplication.order_request oreq ON app.order_request_id = oreq.id
+                      JOIN bnplapplication.order_details od ON od.order_request_id = oreq.id
+                      JOIN bnplapplication.order_item oi ON od.id = oi.order_details_id
+                      JOIN bnplapplication.cruise_reservation cr ON cr.id = oi.id
+             GROUP BY a.account_id
+      
+     
+    --get only uplift loans
+    
+   )
+    
+,account_id_uplift_loan_number AS (
+        SELECT  a.account_id
+                ,ar.reference_account_number AS uplift_loan_number
+                FROM subvented_account_ids a JOIN account.account_reference ar ON a.account_id = ar.account_id
+                 AND ar.reference_account_type = 'UpliftLoan'
+                 AND ar.removal_at IS NULL      --not sure what removal_at is
+     
+     --keeping there here, but it is just to get the partner_confirmation and that is encoded for now but not needed because we need to join back to snowflake to get it
+     
+    ) 
+ 
+ , account_id_booking_confirmation AS (
+        SELECT  a.account_id
+                ,md.confirmation_number AS booking_confirmation
+             FROM subvented_account_ids a
+                      JOIN bnplapplication.application app ON a.account_id = app.id
+                      JOIN bnplapplication.order_request oreq ON app.order_request_id = oreq.id
+                      JOIN bnplapplication.merchant_details md ON oreq.merchant_details_id = md.id
+                      
+      ) 
+      
+      , account_id_currency AS (
+        SELECT a.account_id
+                ,COALESCE(MAX(od.currency), 'USD'::VARCHAR) AS currency
+             FROM subvented_account_ids a
+                      JOIN bnplapplication.application app ON a.account_id = app.id
+                      JOIN bnplapplication.order_request oreq ON app.order_request_id = oreq.id
+                      JOIN bnplapplication.order_details od ON od.order_request_id = oreq.id
+                      GROUP BY a.account_id
+                      
+    )
+
+        SELECT 
+                       sf.id                                                                               AS subvention_fee_id,
+                       ls.up_code                                                                          AS up_code,
+                     --  pc.partner_group,
+                       CONVERT_TIMEZONE('UTC', 'UTC', sf.create_date)::DATE                                AS gl_date,
+                       COALESCE(acc_uplift_loan_no.uplift_loan_number, acc_sub.account_id::VARCHAR)        AS loan_id,
+                       acc_sub.account_id                                                                  AS upgrade_account_id,
+                       acc_booking_conf.booking_confirmation                                               AS booking_confirmation_number,
+                       ls.order_amount                                                                     AS order_amount,
+                       ls.order_amount-ls.down_payment_amount-ls.origination_fee_amount                    AS loan_amount,
+                       ls.variable_fee_bps::NUMERIC(24, 2) / 100                                           AS subvention_rate,
+                       ls.loan_date                                                                        AS loan_date,
+
+                      --not loan issued so it is a refund
+                       CASE WHEN sf.adjustment_type <> 'LOAN_ISSUANCE' THEN sf.effective_date END          AS refund_date,
+                       CASE WHEN sf.adjustment_type <> 'LOAN_ISSUANCE' THEN sf.create_date END          AS create_date,
+                       
+                       acc_currency.currency                                                               AS merchant_currency,
+
+                       --note that fixed fee is included
+                      CASE
+                           WHEN sf.adjustment_type = 'LOAN_ISSUANCE'
+                               THEN sf.fixed_subvention_fee_amount + sf.variable_subvention_fee_amount END AS subvention_amount,
+                               
+                       CASE
+                           WHEN sf.adjustment_type = 'LOAN_ISSUANCE'
+                               THEN sf.fixed_subvention_fee_amount END                                     AS subvention_flat_fee,
+                       
+                       CASE
+                           WHEN sf.adjustment_type = 'LOAN_ISSUANCE'
+                               THEN sf.variable_subvention_fee_amount END                                  AS subvention_variable_fee,
+
+                       --note that fixed fee is included
+                       --CASE
+                       --    WHEN sf.adjustment_type <> 'LOAN_ISSUANCE'
+                       --        THEN sf.fixed_subvention_fee_amount + sf.variable_subvention_fee_amount END AS refund_amount,
+                       
+                        CASE
+                           WHEN sf.adjustment_type <> 'LOAN_ISSUANCE'
+                               THEN sf.original_amount END AS refund_amount,
+                       
+                       COALESCE(acd.ship_code, '')                                                         AS ship_name,
+                       acd.start_date                                                                      AS departure_date,
+                       acd.end_date                                                                        AS sail_return_date,
+                       ls.loan_term_month                                                                  AS loan_term
+                       FROM account_id_subvention_fee acc_sub  
+                                                JOIN flexpaymerchantsubventionfee.loan_subvention_merchant_fee sf ON acc_sub.id = sf.id
+                                                JOIN flexpaymerchantsubventionfee.loan_subvention ls ON ls.id = sf.loan_subvention_id
+        -- LEFT JOIN dw_servicing.partner_classification pc on ls.up_code = pc.up_code 
+                                                LEFT JOIN account_cruise_details acd ON acc_sub.account_id = acd.account_id
+                                                LEFT JOIN account_id_uplift_loan_number acc_uplift_loan_no ON acc_sub.account_id = acc_uplift_loan_no.account_id
+                                                LEFT JOIN account_id_booking_confirmation acc_booking_conf ON acc_sub.account_id = acc_booking_conf.account_id
+                                                LEFT JOIN account_id_currency acc_currency ON acc_sub.account_id = acc_currency.account_id
+
+                        where 1=1
+                        and ((subvention_amount is not null and subvention_amount > 0) 
+                        or (refund_amount is not null and refund_amount > 0))
+                        --and ls.up_code in ('UP-20956569-53','UP-20956569-1','UP-20956569-55','UP-20956569-10','UP-20956569-50','UP-20956569-52','UP-20956569-54',
+                        --                   'UP-20956569-3','UP-20956569-51','UP-20956569-6')
+                        --and refund_amount > 0  -- added for ccl marketing refund file
+                       -- and loan_id = 234603750920
+                        order by loan_id
+                       
+                       
+                        
+                        
+      
+      
