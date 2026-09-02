@@ -1,0 +1,150 @@
+CREATE OR REPLACE TABLE commercial_analytics.public.funnel_detailed AS
+WITH upper_funnel AS (
+
+    SELECT
+        pmf.country,
+        pmf.partner_short,
+        pmf.date,
+        pmf.device_type,
+        pmf.browser_type,
+        pmf.channel,
+        pmf.pm_offered,
+        pmf.pm_selected,
+        'Cevent'    AS fico,
+        'Cevent'    AS order_amount,
+        a.brand
+    FROM
+
+(SELECT
+ pmf.date, pmf.upcode, partner_short, pmf.device_type, pmf.browser_type,pmf.channel,partner.geography as country,
+
+SUM(CASE WHEN TRIM(LOWER(partner.integration_type))='agent connect' AND state_code=367 THEN cid_cnt
+             WHEN state_code IN (3, 457) THEN cid_cnt END) AS pm_offered,
+    SUM(CASE WHEN TRIM(LOWER(partner.integration_type))='agent connect' AND state_code IN (437,435) THEN cid_cnt
+             WHEN TRIM(LOWER(partner.integration_type))='standalone' AND state_code IN (353, 354) THEN cid_cnt
+             WHEN state_code=6 THEN cid_cnt END) AS pm_selected
+
+FROM production.gold.pay_monthly_funnel_daily_agg pmf
+JOIN (SELECT upcode,partner_short,partner_grouping,integration_type,active,geography,sales_segment_code,sales_segment,vertical_l1,vertical_l2,channel,datetime_launch,filter_amount_min AS filter_amount_min,filter_amount_max AS filter_amount_max,filter_window_min,agent_type FROM hive_metastore.bi_layer.partner_classification GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16) partner ON partner.upcode = pmf.upcode
+
+GROUP BY ALL
+) pmf
+
+    LEFT JOIN (select distinct partner_short,brand from commercial_analytics.public.bi_application_detailed) a
+        ON pmf.partner_short = a.partner_short
+    WHERE date >= DATE_TRUNC('YEAR', ADD_MONTHS(CURRENT_DATE, -24))
+    GROUP BY ALL
+),
+
+kasa_funnel AS (
+
+SELECT
+    a.partner_short,
+    a.date_utc                                                              AS date,
+    loan.device_type,
+    a.fico_score                                                     AS fico,
+    CASE WHEN a.fico_score <500 THEN '<500'
+         WHEN a.fico_score BETWEEN 500 AND 549 THEN '500-549'
+         WHEN a.fico_score BETWEEN 550 AND 599 THEN '550-599'
+         WHEN a.fico_score BETWEEN 600 AND 649 THEN '600-649'
+         WHEN a.fico_score BETWEEN 650 AND 699 THEN '650-699'
+         WHEN a.fico_score BETWEEN 700 AND 749 THEN '700-749'
+         WHEN a.fico_score >=  750 THEN '>=750' END                         AS fico_bucket,
+    sum(a.gmv_usd)                                                          AS order_amount,
+    COUNT(a.application_id)                                                 AS pm_applied,
+    COUNT(IF(a.app_econsent = TRUE, 1, NULL))                               AS pm_app_econsent,
+    COUNT(IF(a.decision_status IN ('rejected', 'approved'), 1, NULL))       AS pm_verified,
+    COUNT(IF(a.fico_score >= 550, 1, NULL))                                 AS pm_fico_ge_550,
+    COUNT(IF(a.decision_status = 'approved', 1, NULL))                      AS pm_approved,
+    COUNT(IF(a.loan_econsent = TRUE, 1, NULL))                              AS pm_loan_econsent,
+    COUNT(IF(a.application_accepted_count = 1
+             OR loan.application_id IS NOT NULL, 1, NULL))                  AS pm_accepted,
+    sum(CASE WHEN loan.loan_count = 1 THEN 1 ELSE 0 END)                         AS pm_booking,
+    --COUNT(loan.loan_id)                                                     AS pm_booking,
+    a.brand
+FROM commercial_analytics.public.bi_application_detailed a
+LEFT JOIN commercial_analytics.public.bi_loan_detailed loan
+    ON loan.application_id = a.application_id
+WHERE a.date_utc >= DATE_TRUNC('YEAR', ADD_MONTHS(CURRENT_DATE, -24))
+GROUP BY ALL
+),
+
+combined AS (
+    SELECT
+        COALESCE(f.partner_short, k.partner_short)                          AS partner_short,
+        COALESCE(f.date, k.date)                                            AS date,
+        COALESCE(f.device_type, k.device_type)                              AS device_type,
+        f.browser_type,
+        f.channel,
+        COALESCE(k.fico, f.fico)                                            AS fico,
+    CASE WHEN COALESCE(k.fico, f.fico) <500 THEN '<500'
+         WHEN COALESCE(k.fico, f.fico) BETWEEN 500 AND 549 THEN '500-549'
+         WHEN COALESCE(k.fico, f.fico) BETWEEN 550 AND 599 THEN '550-599'
+         WHEN COALESCE(k.fico, f.fico) BETWEEN 600 AND 649 THEN '600-649'
+         WHEN COALESCE(k.fico, f.fico) BETWEEN 650 AND 699 THEN '650-699'
+         WHEN COALESCE(k.fico, f.fico) BETWEEN 700 AND 749 THEN '700-749'
+         WHEN COALESCE(k.fico, f.fico) >=  750 THEN '>=750' END                         AS fico_bucket,
+        COALESCE(k.order_amount, f.order_amount)                            AS order_amount,
+        k.brand                                                             AS kasa_b,
+        f.brand                                                             AS cevent_b,
+        COALESCE(k.brand, f.brand)                                          AS brand,
+      CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(f.pm_offered, 0)      END AS pm_offered,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(f.pm_selected, 0)     END AS pm_selected,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_applied, 0)      END AS pm_applied,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_app_econsent, 0) END AS pm_app_econsent,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_verified, 0)     END AS pm_verified,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_fico_ge_550, 0)  END AS pm_fico_ge_550,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_approved, 0)     END AS pm_approved,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_loan_econsent, 0)END AS pm_loan_econsent,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_accepted, 0)     END AS pm_accepted,
+CASE WHEN k.fico = 'Cevent' THEN 0 ELSE COALESCE(k.pm_booking, 0)      END AS pm_booking
+    FROM upper_funnel f
+    FULL JOIN kasa_funnel k
+        ON  f.date        = k.date
+        AND f.device_type = k.device_type
+        AND f.fico        = k.fico
+)
+
+SELECT
+    p.partner_grouping,
+    upc.partner                                                             AS partner_full_name,
+    p.upcode,
+    p.partner_short,
+    -- fms.migration_status,
+    p.vertical_l1                                                           AS vertical,
+    aal.account_manager,
+    p.integration_type,
+    p.geography,
+    p.channel,
+    c.date,
+    year(c.date) as year,
+    month(c.date) as month,
+    day(c.date) as day,
+    c.kasa_b,
+    c.cevent_b,
+    c.brand,
+    c.device_type,
+    round(c.fico,0) as fico,
+c.fico_bucket,
+    round(c.order_amount,2) as order_amount,
+    c.pm_offered,
+    c.pm_selected,
+    c.pm_applied,
+    c.pm_app_econsent,
+    c.pm_verified,
+    c.pm_fico_ge_550,
+    c.pm_approved,
+    c.pm_loan_econsent,
+    c.pm_accepted,
+    c.pm_booking
+FROM commercial_analytics.commercial_analytics.partner_classification_legacy p
+LEFT JOIN commercial_analytics.commercial_analytics.uplift_partner_codes upc
+    ON p.upcode = upc.upcode
+LEFT JOIN combined c
+    ON c.partner_short = p.partner_short
+--LEFT JOIN   commercial_analytics.commercial_analytics.funnel_migration_status fms ON p.upcode = fms.upcode
+LEFT JOIN commercial_analytics.commercial_analytics.account_assignments_lkup_legacy_partners aal ON p.partner_grouping = aal.account_name
+
+--WHERE  p.partner_grouping = 'Princess Cruises' AND date between '2025-12-04' AND '2026-06-15' AND fico IS NOT NULL
+
+ORDER BY date DESC, partner_grouping ASC, upcode ASC
