@@ -42,7 +42,7 @@ FROM databrickstors_canalytics_catalog.dw_bnpl.orders
 WHERE order_create_date >= DATE '2023-01-01';
 
 CREATE OR REPLACE TABLE commercial_analytics.commercial_analytics.tmp_ccb AS
-SELECT loan_app_id, fico_score, upflow_create_time
+SELECT loan_app_id, fico_score, vantage4, upflow_create_time
 FROM databrickstors_canalytics_catalog.core.applicant_credit_char_bnpl
 WHERE loan_app_id IN (SELECT application_id FROM commercial_analytics.commercial_analytics.tmp_applications);
 
@@ -72,7 +72,7 @@ CREATE OR REPLACE TABLE commercial_analytics.commercial_analytics.bi_loan_redshi
 WITH
 
 ccb AS (
-    SELECT loan_app_id, fico_score
+    SELECT loan_app_id, fico_score, vantage4
     FROM commercial_analytics.commercial_analytics.tmp_ccb
     QUALIFY ROW_NUMBER() OVER (PARTITION BY loan_app_id ORDER BY upflow_create_time DESC) = 1
 ),
@@ -138,6 +138,8 @@ SELECT
     ,l.til_financed_amount
     ,l.currency                                                               AS currency_local
     ,ccb.fico_score
+    ,ccb.vantage4
+    ,CASE WHEN ccb.fico_score >= 530 THEN true END                            AS vantage4_530
     ,CASE WHEN s.account_id IS NOT NULL THEN true ELSE false END              AS subvention
     ,l.original_merchant_discount_amount                                      AS mdr_amount_local
     ,l.original_merchant_discount_amount * f.usd                             AS mdr_amount_usd
