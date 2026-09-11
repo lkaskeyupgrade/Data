@@ -1,0 +1,138 @@
+-- One-time full backfill for commercial_analytics.public.bi_application
+-- Rebuilds the entire table from 2023-01-01 forward (not just the last 30 days), so
+-- vantage4/vantage_530 (and everything else) get backfilled for existing rows, not
+-- just new ones going through the 30-day incremental job.
+-- Uses CREATE OR REPLACE TABLE instead of DELETE+INSERT so the table's columns/order
+-- are defined fresh from this SELECT.
+-- Run this only after commercial_analytics.commercial_analytics.bi_application_redshift's
+-- own backfill has finished, since this table reads from it.
+-- Do not use this for the recurring job -- use bi_application for that.
+
+create or replace TABLE commercial_analytics.public.bi_application AS (
+WITH base AS (
+    SELECT
+        distinct
+        uplift_application_id
+        ,application_id
+        ,merchant_id
+        ,partner_grouping
+        ,partner_short
+        ,decision_status
+        ,loan_accepted
+        ,loan_issued
+        ,currency_local
+        ,gmv_amount_local
+        ,gmv_amount_usd
+        ,gmv_amount_cad
+        ,fico_score
+        ,fico_550
+        ,vantage4
+        ,vantage_530
+        ,merchant_country
+        ,config_id
+        ,timestamp_utc
+        ,timestamp_etz
+        ,cast(timestamp_utc as date) as app_date_utc
+        ,cast(convert_timezone('UTC','America/New_York',timestamp_utc) as date) as app_date_etz
+        ,uplift_order_id
+        ,uplift_upcode
+        ,null as account_id
+        ,applicant_country
+        ,null as apr
+        ,booking_window
+        ,trip_start_date
+        ,trip_end_date
+        ,channel
+        ,device_type
+        ,source
+        from commercial_analytics.commercial_analytics.bi_application_redshift
+        where 1=1
+        and timestamp_utc >= '2023-01-01'
+
+    UNION ALL
+
+    SELECT
+       distinct
+
+        l.application_id as uplift_application_id
+        ,null as application_id
+        ,null as merchant_id
+
+        ,CASE
+          WHEN lower(COALESCE(m.description, '')) LIKE '%southwest vacations%' THEN 'Getaways by Southwest'
+          WHEN lower(COALESCE(m.description, '')) LIKE '%getaways by southwest%' THEN 'Getaways by Southwest'
+          else m.name
+          END AS partner_grouping
+
+         ,m.description as partner_short
+
+         ,case
+            when l.status in ('aa','unknown') then 'REJECTED'
+            when l.status = 'approved' then 'APPROVED'
+            else l.status
+            end as decision_status
+          ,l.hard_pull as loan_accepted
+          ,sf_loans.report_as_loan as loan_issued
+          ,l.currency_local
+          ,l.gmv_amount_local
+          ,l.gmv_amount_usd
+          ,l.gmv_amount_cad
+          ,fico as fico_score
+
+          ,case when fico >= 550 then true end as fico_550
+          ,null as vantage4
+          ,cast(null as boolean) as vantage_530
+
+          ,l.merchant_country
+          ,null as config_id
+          ,l.timestamp_utc as timestamp_utc
+          ,l.timestamp_eastern as timestamp_etz
+          ,l.application_date_utc as app_date_utc
+          ,l.application_date_eastern as app_date_etz
+          ,l.order_id as uplift_order_id
+          ,l.upcode as uplift_upcode
+          ,l.account_id
+          ,l.borrower_country
+          ,l.apr
+          ,null as booking_window
+          ,null as trip_start_date
+          ,null as trip_end_date
+          ,null as channel
+          ,null as device_type
+          ,'legacy' as  source
+
+              from commercial_analytics.commercial_analytics.bi_application_legacy l
+                     left join databrickstors_canalytics_catalog.dw_bnpl.applications aps on l.application_id = aps.uplift_application_id
+
+                     left join databrickstors_canalytics_catalog.bnplmerchant.configuration c on aps.config_id = c.id
+
+                     left join databrickstors_canalytics_catalog.bnplmerchant.merchant m  on c.merchant_id = m.id
+
+                     left join commercial_analytics.commercial_analytics.bi_loan_legacy sf_loans on l.application_id = sf_loans.application_id
+        where 1=1
+          and application_date_utc >= '2023-01-01'
+)
+
+
+
+,counted AS (
+    SELECT distinct
+        *
+        ,COUNT(uplift_application_id) OVER (PARTITION BY uplift_application_id) AS uplift_application_id_count
+    FROM base
+)
+
+SELECT
+    distinct *
+          ,year(timestamp_utc) as yr_utz
+          ,year(timestamp_etz) as yr_etz
+          ,month(timestamp_utc) as mth_utc
+          ,month(timestamp_etz) as mth_etz
+          ,dayname(timestamp_utc) as dow_utz
+          ,dayname(timestamp_etz) as dow_etz
+
+  FROM counted
+    WHERE 1=1
+    and uplift_application_id_count <= 1                                        -- keep all rows with no duplicate
+    or (uplift_application_id_count >= 2 AND source = 'redshift')           -- keep only redshift row when duplicate exists
+);
