@@ -1,0 +1,167 @@
+delete from  commercial_analytics.dev.bi_application_redshift
+where timestamp_utc >= date_sub(current_date(),30);
+
+insert into commercial_analytics.dev.bi_application_redshift
+--create or replace TABLE commercial_analytics.dev.bi_application_redshift
+(
+
+with latest_decision_dups as (
+       select
+              da.loan_app_id
+              ,da.create_date
+              ,cd.result
+              ,cd.update_date
+              ,row_number() OVER (PARTITION BY loan_app_id order by cd.update_date desc) AS loan_app_id_count
+              from decisioning.application da left join decisioning.credit_decision cd on da.id = cd.application_id
+              where 1=1
+              and program = 'BNPL'
+             --and da.create_date >= '2023-01-01'
+             -- and da.create_date <= '2023-01-01'
+              and da.create_date >= date_sub(current_date(), 30)
+             )
+
+
+,latest_decision AS (
+
+            select
+              loan_app_id
+              ,create_date
+              ,result
+              ,update_date as latest_decision_date
+            from latest_decision_dups
+            where loan_app_id_count = 1
+)
+
+
+select
+        distinct
+        case
+              when dw.status = 'OFFERED' or ld.result = 'APPROVED'
+              then 'APPROVED'
+
+            when (dw.status = 'REJECTED' and ld.result = 'DECLINED')
+            or (dw.status = 'REJECTED' and ld.result = 'CREDIT_FREEZE')
+            or (dw.status = 'REJECTED' and ld.result = 'NO_HIT')
+            or (dw.status = 'EXPIRED' and ld.result in ('NO_HIT','DECLINED','CREDIT_FREEZE'))
+            or dw.status = 'NO_HIT'
+            then  'REJECTED'
+
+            when dw.status = 'EXPIRED' and ld.result is null then 'EXPIRED - UNKNOWN'
+
+            else 'UNKNOWN - MIXED STATUS'
+            end as decision_status
+
+       ,case
+              when dw.status = 'ISSUED' then true end as loan_issued
+
+        ,ccb.fico_score
+       ,case when ccb.fico_score >= 550 then true end as fico_550
+       ,ccb.vantage4
+       ,case when ccb.fico_score >= 530 then true end as vantage_530
+
+       ,al.loan_accepted
+
+        ,ld.latest_decision_date
+        ,m.name as partner_grouping
+
+        ,c.description as partner_short
+        ,dw.application_id
+        ,dw.uplift_application_id
+        ,convert_timezone('UTC','America/New_York',dw.application_create_date) as timestamp_etz
+         ,dw.application_create_date as timestamp_utc
+         ,dw.uplift_order_id
+        ,dw.uplift_upcode
+        ,dw.stated_income
+        ,dw.age_bucket
+        ,dw.zip_first3
+        ,dw.applicant_state
+        ,dw.applicant_country
+        ,c.id as config_id
+        ,c.integration_id
+        ,c.merchant_id
+        ,ord.merchant_currency as currency_local
+        ,ord.order_amount as gmv_amount_local
+        ,ord.order_amount*usd as gmv_amount_usd
+        ,ord.order_amount*CAD as gmv_amount_cad
+        ,ord.total_insurance_price
+        ,ord.total_people
+        ,ord.num_of_people_incl_minors
+        ,ord.order_type
+        ,ord.start_date as trip_start_date
+        ,ord.end_date as trip_end_date
+        ,ord.adv_booking as booking_window
+        ,ord.order_details
+        ,ord.merchant_path
+        ,ord.merchant_country
+        ,ord.agent_email
+        ,ord.device_type
+        ,ord.confirmation_id as partner_confirmation
+        ,od.add_ons:[0].name as addon_name
+        ,od.add_ons:[2].name as addon_price
+        ,od.add_ons
+        ,m.status as merchant_status
+        ,i.platform
+        ,i.type
+        ,i.channel
+        ,i.agent_type
+        ,case
+            when uplift_application_id is not null then 'redshift'
+            when uplift_application_id is null then 'redshift_mig'
+            end as source
+       --,sf.subvention_campaign_id
+
+        from databrickstors_canalytics_catalog.dw_bnpl.applications dw
+
+              left join databrickstors_canalytics_catalog.bnplmerchant.configuration c on dw.config_id = c.id
+
+              left join databrickstors_canalytics_catalog.bnplmerchant.merchant m on m.id = c.merchant_id
+
+              left join databrickstors_canalytics_catalog.bnplmerchant.integration i on c.merchant_id = i.id
+
+              left join core.applicant_credit_char_bnpl ccb on  dw.application_id = ccb.loan_app_id
+
+              left join (select * from databrickstors_canalytics_catalog.dw_bnpl.orders
+              where 1=1
+             -- and order_create_date >= '2023-01-01'
+              and order_create_date >= date_sub(current_date(),30)
+              ) ord  on dw.uplift_order_id = ord.uplift_order_id
+
+              left join commercial_analytics.commercial_analytics.fx_rates_legacy f
+              on cast(ord.order_create_date as date) = f.reporting_date and ord.merchant_currency = f.base_currency_code
+
+              left join (select distinct id, order_request_id, order_amount, add_ons from databrickstors_canalytics_catalog.bnplapplication.order_details
+              where 1=1
+             and  create_date >= date_sub(current_date(),30)
+             -- and create_date >= '2023-01-01'
+              and removal_date is null)
+              od on dw.order_request_id = od.order_request_id
+
+              left join latest_decision ld on dw.application_id = ld.loan_app_id
+
+              left join (select application_id, true as loan_accepted from databrickstors_canalytics_catalog.bnplapplication.action_log
+              where  1=1
+             -- and create_date >= '2023-01-01'
+             and create_date >= date_sub(current_date(),30)
+              and action_type = 'DISBURSEMENT_INSTRUMENT_CREATED' ) al on al.application_id = dw.application_id
+
+        where 1=1
+
+      --and dw.application_create_date >= '2023-01-01'
+      -- and uplift_application_id = 'K07604360008'
+      -- and application_create_date < '2026-02-01'
+        and dw.application_create_date >= date_sub(current_date(), 30)
+      --and dw.application_id = 366342145
+        );
+
+
+   --  select year(timestamp_etz)
+   --   ,month(timestamp_etz)
+   --   ,source
+   --  ,count(distinct case
+   --     when uplift_application_id is null
+   --      then application_id
+   --    end) as base_counts
+   --   ,count(distinct case
+   --      when uplift_application_id is not null
+   --      then uplift_application_id
+   --    end) as uplift_counts
