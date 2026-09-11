@@ -1,6 +1,6 @@
 -- One-time full backfill for commercial_analytics.public.bi_application
 -- Rebuilds the entire table from 2023-01-01 forward (not just the last 30 days), so
--- vantage4/vantage_530 (and everything else) get backfilled for existing rows, not
+-- vantage4/vantage4_530 (and everything else) get backfilled for existing rows, not
 -- just new ones going through the 30-day incremental job.
 -- Uses CREATE OR REPLACE TABLE instead of DELETE+INSERT so the table's columns/order
 -- are defined fresh from this SELECT.
@@ -27,7 +27,7 @@ WITH base AS (
         ,fico_score
         ,fico_550
         ,vantage4
-        ,vantage_530
+        ,vantage4_530
         ,merchant_country
         ,config_id
         ,timestamp_utc
@@ -81,7 +81,7 @@ WITH base AS (
 
           ,case when fico >= 550 then true end as fico_550
           ,null as vantage4
-          ,cast(null as boolean) as vantage_530
+          ,cast(null as boolean) as vantage4_530
 
           ,l.merchant_country
           ,null as config_id

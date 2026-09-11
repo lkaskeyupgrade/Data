@@ -1,6 +1,6 @@
 -- One-time full backfill for commercial_analytics.commercial_analytics.bi_application_redshift
 -- Rebuilds the entire table from 2023-01-01 forward (not just the last 30 days), so
--- vantage4/vantage_530 get populated for existing historical rows, not just new ones
+-- vantage4/vantage4_530 get populated for existing historical rows, not just new ones
 -- going through the recurring 30-day job.
 -- Uses CREATE OR REPLACE TABLE instead of DELETE+INSERT so the table's columns/order
 -- are defined fresh from this SELECT. NOTE: this replaces the live prod table --
@@ -111,7 +111,7 @@ select
             end as source
        --,sf.subvention_campaign_id
        ,ccb.vantage4
-       ,case when ccb.fico_score >= 530 then true end as vantage_530
+       ,case when ccb.fico_score >= 530 then true end as vantage4_530
 
         from databrickstors_canalytics_catalog.dw_bnpl.applications dw
 

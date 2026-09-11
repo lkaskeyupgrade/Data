@@ -21,7 +21,7 @@ WITH base AS (
         ,fico_score
         ,fico_550
         ,vantage4
-        ,vantage_530
+        ,vantage4_530
         ,merchant_country
         ,config_id
         ,timestamp_utc
@@ -76,7 +76,7 @@ WITH base AS (
           
           ,case when fico >= 550 then true end as fico_550
           ,null as vantage4
-          ,cast(null as boolean) as vantage_530
+          ,cast(null as boolean) as vantage4_530
 
           ,l.merchant_country
           ,null as config_id
