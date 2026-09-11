@@ -1,0 +1,191 @@
+-- ============================================================
+-- STEP 1: Stage all external catalog tables into Delta
+-- ============================================================
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_applications AS
+SELECT application_id, age_bucket, config_id, order_request_id, application_create_date
+FROM databrickstors_canalytics_catalog.dw_bnpl.applications
+WHERE application_create_date >= DATE '2023-01-01'
+  AND status IN ('ISSUED','CHARGED_OFF','DEBT_SOLD');
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_loans AS
+SELECT loan_id
+      ,uplift_loan_id
+      ,origination_date
+      ,merchant_group
+      ,upcode
+      ,stated_annual_income
+      ,original_zip_code
+      ,original_borrower_state
+      ,country
+      ,down_payment
+      ,loan_amount
+      ,time_to_travel
+      ,term
+      ,apr
+      ,loan_status_internal
+      ,loan_status
+      ,fico_range_low
+      ,fico_range_high
+      ,maturity_date
+      ,til_financed_amount
+      ,currency
+      ,original_merchant_discount_amount
+      ,original_merchant_discount_rate
+FROM databrickstors_canalytics_catalog.core.loan_issued_bnpl
+WHERE origination_date >= DATE '2023-01-01';
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_orders AS
+SELECT order_request_id, order_create_date, confirmation_id, device_type,
+       channel, start_date, end_date, order_amount, merchant_path, order_detail_id
+FROM databrickstors_canalytics_catalog.dw_bnpl.orders
+WHERE order_create_date >= DATE '2023-01-01';
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_ccb AS
+SELECT loan_app_id, fico_score, vantage4, upflow_create_time
+FROM databrickstors_canalytics_catalog.core.applicant_credit_char_bnpl
+WHERE loan_app_id IN (SELECT application_id FROM commercial_analytics.dev.tmp_applications);
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_dpd AS
+SELECT loan_id, days_past_due, processing_date
+FROM databrickstors_canalytics_catalog.core.report_daily_positions_bnpl
+WHERE origination_date >= DATE '2023-01-01';
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_configuration AS
+SELECT id, merchant_id, description
+FROM databrickstors_canalytics_catalog.bnplmerchant.configuration;
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_merchant AS
+SELECT id, name
+FROM databrickstors_canalytics_catalog.bnplmerchant.merchant;
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.tmp_loan_subvention AS
+SELECT account_id
+FROM databrickstors_canalytics_catalog.flexpaymerchantsubventionfee.loan_subvention;
+
+
+-- ============================================================
+-- STEP 2: Main query — all joins now on Delta tables
+-- ============================================================
+
+CREATE OR REPLACE TABLE commercial_analytics.dev.bi_loan_redshift AS
+WITH
+
+ccb AS (
+    SELECT loan_app_id, fico_score, vantage4
+    FROM commercial_analytics.dev.tmp_ccb
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY loan_app_id ORDER BY upflow_create_time DESC) = 1
+),
+
+dpd AS (
+    SELECT loan_id, days_past_due
+    FROM commercial_analytics.dev.tmp_dpd
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY loan_id ORDER BY processing_date DESC) = 1
+),
+
+fx AS (
+    SELECT reporting_date, base_currency_code, usd, cad
+    FROM commercial_analytics.commercial_analytics.fx_rates_legacy
+    WHERE reporting_date >= DATE '2023-01-01'
+)
+
+SELECT
+     l.loan_id
+    ,l.uplift_loan_id
+    ,l.origination_date
+    ,o.order_request_id
+    ,o.order_detail_id
+    ,c.description                                                            AS partner_short
+    ,COALESCE(
+        CASE
+            WHEN lower(m.name) LIKE '%southwest vacations%'
+              OR lower(m.name) LIKE '%getaways by southwest%'
+            THEN 'Getaways by Southwest'
+            ELSE m.name
+        END
+    , l.merchant_group)                                                       AS partner_grouping
+    ,o.merchant_path
+    ,o.order_create_date
+    ,dw.application_create_date                                               AS timestamp_utc
+    ,convert_timezone('UTC', 'America/New_York', dw.application_create_date)  AS timestamp_etz
+    ,cast(dw.application_create_date AS date)                                 AS loan_date_utc
+    ,cast(convert_timezone('UTC', 'America/New_York', dw.application_create_date) AS date) AS loan_date_etz
+    ,l.upcode
+    ,l.stated_annual_income
+    ,dw.age_bucket
+    ,l.original_zip_code
+    ,l.original_borrower_state
+    ,l.country
+    ,l.down_payment
+    ,o.order_amount                                                           AS gmv_amount_local
+    ,o.order_amount * f.usd                                                   AS gmv_amount_usd
+    ,o.order_amount * f.cad                                                   AS gmv_amount_cad
+    ,l.loan_amount                                                            AS loan_amount_local
+    ,l.loan_amount * f.usd                                                    AS loan_amount_usd
+    ,l.loan_amount * f.cad                                                    AS loan_amount_cad
+    ,l.time_to_travel                                                         AS booking_window
+    ,o.start_date                                                             AS trip_start_date
+    ,o.end_date                                                               AS trip_end_date
+    ,l.term                                                                   AS loan_term
+    ,o.device_type
+    ,o.channel
+    ,l.apr
+    ,l.loan_status_internal
+    ,l.loan_status
+    ,l.fico_range_low
+    ,l.fico_range_high
+    ,l.maturity_date
+    ,l.til_financed_amount
+    ,l.currency                                                               AS currency_local
+    ,ccb.fico_score
+    ,ccb.vantage4
+    ,CASE WHEN ccb.fico_score >= 530 THEN true END                            AS vantage4_530
+    ,CASE WHEN s.account_id IS NOT NULL THEN true ELSE false END              AS subvention
+    ,l.original_merchant_discount_amount                                      AS mdr_amount_local
+    ,l.original_merchant_discount_amount * f.usd                             AS mdr_amount_usd
+    ,l.original_merchant_discount_amount * f.cad                             AS mdr_amount_cad
+    ,l.original_merchant_discount_rate                                        AS mdr_rate
+    ,o.confirmation_id                                                        AS partner_confirmation
+    ,dpd.days_past_due
+    ,'redshift'                                                               AS source
+
+FROM commercial_analytics.dev.tmp_applications dw
+
+LEFT JOIN commercial_analytics.dev.tmp_loans l
+    ON dw.application_id = l.loan_id
+
+LEFT JOIN fx f
+    ON cast(dw.application_create_date AS date) = f.reporting_date
+   AND l.currency = f.base_currency_code
+
+LEFT JOIN commercial_analytics.dev.tmp_orders o
+    ON dw.order_request_id = o.order_request_id
+
+LEFT JOIN ccb
+    ON l.loan_id = ccb.loan_app_id
+
+LEFT JOIN commercial_analytics.dev.tmp_configuration c
+    ON dw.config_id = c.id
+
+LEFT JOIN commercial_analytics.dev.tmp_merchant m
+    ON m.id = c.merchant_id
+
+LEFT JOIN commercial_analytics.dev.tmp_loan_subvention s
+    ON l.loan_id = s.account_id
+
+LEFT JOIN dpd
+    ON l.loan_id = dpd.loan_id
+;
+
+-- ============================================================
+-- STEP 3: Cleanup temp tables
+-- ============================================================
+
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_applications;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_loans;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_orders;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_ccb;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_dpd;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_configuration;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_merchant;
+DROP TABLE IF EXISTS commercial_analytics.dev.tmp_loan_subvention;
