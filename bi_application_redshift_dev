@@ -12,7 +12,7 @@ with latest_decision_dups as (
               ,cd.result
               ,cd.update_date
               ,row_number() OVER (PARTITION BY loan_app_id order by cd.update_date desc) AS loan_app_id_count
-              from decisioning.application da left join decisioning.credit_decision cd on da.id = cd.application_id
+              from databrickstors_canalytics_catalog.decisioning.application da left join databrickstors_canalytics_catalog.decisioning.credit_decision cd on da.id = cd.application_id
               where 1=1
               and program = 'BNPL'
              --and da.create_date >= '2023-01-01'
@@ -56,8 +56,6 @@ select
 
         ,ccb.fico_score
        ,case when ccb.fico_score >= 550 then true end as fico_550
-       ,ccb.vantage4
-       ,case when ccb.fico_score >= 530 then true end as vantage_530
 
        ,al.loan_accepted
 
@@ -109,6 +107,8 @@ select
             when uplift_application_id is null then 'redshift_mig'
             end as source
        --,sf.subvention_campaign_id
+       ,ccb.vantage4
+       ,case when ccb.fico_score >= 530 then true end as vantage_530
 
         from databrickstors_canalytics_catalog.dw_bnpl.applications dw
 
@@ -118,7 +118,7 @@ select
 
               left join databrickstors_canalytics_catalog.bnplmerchant.integration i on c.merchant_id = i.id
 
-              left join core.applicant_credit_char_bnpl ccb on  dw.application_id = ccb.loan_app_id
+              left join databrickstors_canalytics_catalog.core.applicant_credit_char_bnpl ccb on  dw.application_id = ccb.loan_app_id
 
               left join (select * from databrickstors_canalytics_catalog.dw_bnpl.orders
               where 1=1
