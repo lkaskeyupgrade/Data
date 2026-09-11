@@ -48,6 +48,8 @@ WITH base AS (
         ,device_type
         ,loan_term
         ,subvention
+        ,vantage4
+        ,vantage4_530
         ,days_past_due
         ,source
         ,partner_confirmation
@@ -88,6 +90,8 @@ WITH base AS (
         ,l.device_type
         ,l.loan_term
         ,CASE WHEN subvention_id IS NOT NULL THEN true ELSE false END AS subvention
+        ,null                                                   AS vantage4
+        ,cast(null as boolean)                                  AS vantage4_530
         ,-99                                                    AS days_past_due
         ,'legacy'                                               AS source
         ,l.partner_confirmation
@@ -126,6 +130,8 @@ SELECT
     ,device_type
     ,channel
     ,subvention
+    ,vantage4
+    ,vantage4_530
     ,mdr_rate
     ,mdr_amount_local
     ,mdr_amount_usd
