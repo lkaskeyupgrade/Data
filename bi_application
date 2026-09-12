@@ -136,22 +136,3 @@ SELECT
     WHERE 1=1 
     and uplift_application_id_count <= 1                                        -- keep all rows with no duplicate
     or (uplift_application_id_count >= 2 AND source = 'redshift')           -- keep only redshift row when duplicate exists
-
-
- --    select year(timestamp_etz)
- --     ,month(timestamp_etz)
- --     ,source
- --    ,count(distinct case 
- --       when uplift_application_id is null 
- --        then application_id 
- --      end) as base_counts
- --     ,count(distinct case 
- --        when uplift_application_id is not null 
- --        then uplift_application_id 
- --      end) as uplift_counts
---from commercial_analytics.public.bi_application
---where 1=1
---and timestamp_etz >= '2026-01-01'
---group by all
---order by 1,2,3;
-
