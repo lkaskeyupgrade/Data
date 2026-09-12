@@ -108,7 +108,7 @@ select
             end as source
        --,sf.subvention_campaign_id
        ,ccb.vantage4
-       ,case when ccb.fico_score >= 530 then true end as vantage4_530
+       ,case when ccb.vantage4 >= 530 then true end as vantage4_530
 
         from databrickstors_canalytics_catalog.dw_bnpl.applications dw
 
