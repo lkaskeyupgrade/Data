@@ -139,7 +139,7 @@ SELECT
     ,l.currency                                                               AS currency_local
     ,ccb.fico_score
     ,ccb.vantage4
-    ,CASE WHEN ccb.fico_score >= 530 THEN true END                            AS vantage4_530
+    ,CASE WHEN ccb.vantage4 >= 530 THEN true END                            AS vantage4_530
     ,CASE WHEN s.account_id IS NOT NULL THEN true ELSE false END              AS subvention
     ,l.original_merchant_discount_amount                                      AS mdr_amount_local
     ,l.original_merchant_discount_amount * f.usd                             AS mdr_amount_usd
