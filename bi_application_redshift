@@ -146,22 +146,7 @@ select
 
         where 1=1
 
-      --and dw.application_create_date >= '2023-01-01'
-      -- and uplift_application_id = 'K07604360008'
-      -- and application_create_date < '2026-02-01'
         and dw.application_create_date >= date_sub(current_date(), 30)
-      --and dw.application_id = 366342145
         );
 
 
-   --  select year(timestamp_etz)
-   --   ,month(timestamp_etz)
-   --   ,source
-   --  ,count(distinct case
-   --     when uplift_application_id is null
-   --      then application_id
-   --    end) as base_counts
-   --   ,count(distinct case
-   --      when uplift_application_id is not null
-   --      then uplift_application_id
-   --    end) as uplift_counts
