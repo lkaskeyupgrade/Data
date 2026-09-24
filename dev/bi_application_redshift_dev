@@ -1,9 +1,4 @@
-delete from  commercial_analytics.dev.bi_application_redshift
-where timestamp_utc >= date_sub(current_date(),30);
-
-insert into commercial_analytics.dev.bi_application_redshift
---create or replace TABLE commercial_analytics.dev.bi_application_redshift
-(
+create or replace table commercial_analytics.dev.bi_application_redshift as
 
 with latest_decision_dups as (
        select
@@ -15,9 +10,7 @@ with latest_decision_dups as (
               from databrickstors_canalytics_catalog.decisioning.application da left join databrickstors_canalytics_catalog.decisioning.credit_decision cd on da.id = cd.application_id
               where 1=1
               and program = 'BNPL'
-             --and da.create_date >= '2023-01-01'
-             -- and da.create_date <= '2023-01-01'
-              and da.create_date >= date_sub(current_date(), 30)
+              and da.create_date >= '2023-01-01'
              )
 
 
@@ -35,7 +28,12 @@ with latest_decision_dups as (
 
 select
         distinct
+
         case
+          when ast.from_status = 'PRE_QUALIFIED' then true
+          when ast.from_status <> 'PRE_QUALIFIED' then false
+          end as pre_qual
+        ,case
               when dw.status = 'OFFERED' or ld.result = 'APPROVED'
               then 'APPROVED'
 
@@ -51,17 +49,13 @@ select
             else 'UNKNOWN - MIXED STATUS'
             end as decision_status
 
-       ,case
-              when dw.status = 'ISSUED' then true end as loan_issued
+       ,case when dw.status = 'ISSUED' then true end as loan_issued
 
         ,ccb.fico_score
        ,case when ccb.fico_score >= 550 then true end as fico_550
-
        ,al.loan_accepted
-
-        ,ld.latest_decision_date
+       ,ld.latest_decision_date
         ,m.name as partner_grouping
-
         ,c.description as partner_short
         ,dw.application_id
         ,dw.uplift_application_id
@@ -106,8 +100,7 @@ select
             when uplift_application_id is not null then 'redshift'
             when uplift_application_id is null then 'redshift_mig'
             end as source
-       --,sf.subvention_campaign_id
-       ,ccb.vantage4
+        ,ccb.vantage4
        ,case when ccb.fico_score >= 530 then true end as vantage4_530
 
         from databrickstors_canalytics_catalog.dw_bnpl.applications dw
@@ -122,8 +115,7 @@ select
 
               left join (select * from databrickstors_canalytics_catalog.dw_bnpl.orders
               where 1=1
-             -- and order_create_date >= '2023-01-01'
-              and order_create_date >= date_sub(current_date(),30)
+              and order_create_date >= '2023-01-01'
               ) ord  on dw.uplift_order_id = ord.uplift_order_id
 
               left join commercial_analytics.commercial_analytics.fx_rates_legacy f
@@ -131,8 +123,7 @@ select
 
               left join (select distinct id, order_request_id, order_amount, add_ons from databrickstors_canalytics_catalog.bnplapplication.order_details
               where 1=1
-             and  create_date >= date_sub(current_date(),30)
-             -- and create_date >= '2023-01-01'
+              and create_date >= '2023-01-01'
               and removal_date is null)
               od on dw.order_request_id = od.order_request_id
 
@@ -140,28 +131,16 @@ select
 
               left join (select application_id, true as loan_accepted from databrickstors_canalytics_catalog.bnplapplication.action_log
               where  1=1
-             -- and create_date >= '2023-01-01'
-             and create_date >= date_sub(current_date(),30)
+              and create_date >= '2023-01-01'
               and action_type = 'DISBURSEMENT_INSTRUMENT_CREATED' ) al on al.application_id = dw.application_id
+
+              left join commercial_analytics.commercial_analytics.application_status_transition ast on dw.application_id = ast.application_id
 
         where 1=1
 
-      --and dw.application_create_date >= '2023-01-01'
       -- and uplift_application_id = 'K07604360008'
       -- and application_create_date < '2026-02-01'
-        and dw.application_create_date >= date_sub(current_date(), 30)
+        and dw.application_create_date >= '2023-01-01'
       --and dw.application_id = 366342145
-        );
+        ;
 
-
-   --  select year(timestamp_etz)
-   --   ,month(timestamp_etz)
-   --   ,source
-   --  ,count(distinct case
-   --     when uplift_application_id is null
-   --      then application_id
-   --    end) as base_counts
-   --   ,count(distinct case
-   --      when uplift_application_id is not null
-   --      then uplift_application_id
-   --    end) as uplift_counts
